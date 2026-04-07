@@ -126,7 +126,7 @@ func loadJournal(path string) ([]*types.Transaction, error) {
 
 func main() {
 	// --- 配置区域 ---
-	dataDir := "./devdata/geth" // 注意这里指向 geth 目录，而不是 chaindata
+	dataDir := "/home/star/go-ethereum/devdata/geth" // 注意这里指向 geth 目录，而不是 chaindata
 	// ----------------
 
 	// 1. 打开底层数据库 (我们需要它来读取 StateDB，以验证交易池中的交易是否合法)
@@ -174,11 +174,12 @@ func main() {
 		head:   head,
 		scheme: scheme,
 	}
-	_, err = chain.StateAt(head.Root)
+	headState, err := chain.StateAt(head.Root)
 	if err != nil {
 		fmt.Printf("❌ 无法创建 StateDB: %v\n", err)
 		os.Exit(1)
 	}
+	fmt.Printf("📦 当前 head block=%d stateRoot=%s\n", head.Number.Uint64(), head.Root)
 
 	// 4. 初始化交易池配置
 	// 这里我们模拟 Geth 的默认配置
@@ -201,15 +202,31 @@ func main() {
 		fmt.Printf("❌ 无法读取交易池日志: %v\n", err)
 		os.Exit(1)
 	}
+	signer := types.LatestSigner(chainConfig)
 	if len(journalTxs) > 0 {
+		fmt.Println("📄 journal 交易与当前 head state 对比:")
+		for _, tx := range journalTxs {
+			from, err := types.Sender(signer, tx)
+			if err != nil {
+				fmt.Printf("   %s nonce=%d sender恢复失败: %v\n", tx.Hash(), tx.Nonce(), err)
+				continue
+			}
+			fmt.Printf("   %s from=%s txNonce=%d headNonce=%d\n", tx.Hash(), from.Hex(), tx.Nonce(), headState.GetNonce(from))
+		}
+
 		errs := txPool.Add(journalTxs, true)
 		dropped := 0
-		for _, err := range errs {
+		for i, err := range errs {
 			if err != nil {
 				dropped++
+				fmt.Printf("丢弃交易%s: %v\n", journalTxs[i].Hash(), err)
+			} else {
+				fmt.Printf("接受交易%s nonce=%d\n", journalTxs[i].Hash(), journalTxs[i].Nonce())
 			}
 		}
 		fmt.Printf("📄 已从 journal 读取 %d 笔交易，丢弃 %d 笔无效交易\n", len(journalTxs), dropped)
+		pendingContent, queuedContent := txPool.Content()
+		fmt.Printf("pending accounts=%d queued accounts=%d\n", len(pendingContent), len(queuedContent))
 	}
 
 	// 注意：在真实的 Geth 运行中，交易池是动态更新的。
@@ -221,9 +238,9 @@ func main() {
 	// 6. 获取待处理交易 (Pending Transactions)
 	// Pending 指的是 Nonce 正确，随时可以被打包的交易
 	pending, _ := txPool.Pending(txpool.PendingFilter{})
+	_, queued := txPool.Content()
 
 	count := 0
-	signer := types.LatestSigner(chainConfig)
 	for addr, txs := range pending {
 		fmt.Printf("\n--- 🧑 账户: %s ---\n", addr.Hex())
 		for _, lazyTx := range txs {
@@ -246,6 +263,23 @@ func main() {
 			fmt.Printf("      金额: %s Wei\n", tx.Value().String())
 			fmt.Printf("      Nonce: %d\n", tx.Nonce())
 			fmt.Printf("      Gas价格: %s\n", tx.GasPrice().String())
+		}
+	}
+	for addr, txs := range queued {
+		fmt.Printf("\n--- ⏳ Queued 账户: %s ---\n", addr.Hex())
+		for _, tx := range txs {
+			count++
+			to := tx.To()
+			toStr := "合约创建"
+			if to != nil {
+				toStr = to.Hex()
+			}
+			fmt.Printf("   ⏳ 队列交易: %s\n", tx.Hash())
+			fmt.Printf("      接收者: %s\n", toStr)
+			fmt.Printf("      金额: %s Wei\n", tx.Value().String())
+			fmt.Printf("      Nonce: %d\n", tx.Nonce())
+			fmt.Printf("      当前账户 nonce: %d\n", headState.GetNonce(addr))
+			fmt.Printf("      说明: queued 表示交易有效但暂时不能执行，通常是 nonce 不连续。\n")
 		}
 	}
 
